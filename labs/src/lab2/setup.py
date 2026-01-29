@@ -29,6 +29,7 @@ setup(
         'console_scripts': [
             'static_turtle_tf2_broadcaster = lab2.static_turtle_tf2_broadcaster:main',
             'turtle_tf2_broadcaster = lab2.turtle_tf2_broadcaster:main',
+            'turtle_tf2_listener = lab2.turtle_tf2_listener:main',
         ],
     },
 )
