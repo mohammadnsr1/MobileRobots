@@ -207,8 +207,9 @@ marimo/_lsp/
 __marimo__/
 
 #user specific ignores
-labs/build/*
-labs/.vscode/*
-labs/log/*
-labs/install/*
-labs/src/ras598_sim/*
+labs/build/.
+labs/.vscode/.
+labs/log/.
+labs/install/.
+labs/src/ras598_sim/.
+labs/src/vm_setup/.
