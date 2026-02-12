@@ -15,7 +15,7 @@ setup(
     zip_safe=True,
     maintainer='mohammadnsr1',
     maintainer_email='nasrmohammad661@gmail.com',
-    description='TODO: Package description',
+    description='lab3',
     license='Apache-2.0',
     extras_require={
         'test': [
@@ -24,6 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'robot_drive = lab3.robot_drive:main',
         ],
     },
 )
