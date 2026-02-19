@@ -1,50 +1,71 @@
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import TwistStamped # Changed
+from geometry_msgs.msg import TwistStamped
 import time
 
 class RobotDrive(Node):
     def __init__(self):
         super().__init__('robot_drive')
         self.publisher_ = self.create_publisher(TwistStamped, '/robot_10/cmd_vel', 10)
-        time.sleep(1) 
+
+        time.sleep(1.0)
+
+        self.linear_x = 0.0
+        self.angular_z = 0.0
+
         self.get_logger().info('Starting Motion Loop...')
         self.execute_shape()
+        self.get_logger().info('Done.')
 
-    def create_stamped_msg(self, linear_x=0.0, angular_z=0.0):
-        """Helper to create a TwistStamped message with current time."""
+    def create_stamped_msg(self):
         msg = TwistStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = 'base_link' # Common frame for velocity
-        msg.twist.linear.x = linear_x
-        msg.twist.angular.z = angular_z
+        msg.header.frame_id = 'base_link'
+        msg.twist.linear.x = float(self.linear_x)
+        msg.twist.angular.z = float(self.angular_z)
         return msg
 
-    def move_forward(self, duration):
-        msg = self.create_stamped_msg(linear_x=1.0)
-        self.publisher_.publish(msg)
-        time.sleep(duration)
+    def move_forward(self, duration, hz=100.0):
+        self.linear_x = 1.0
+        self.angular_z = 0.0
+        dt = 1.0 / hz
+        start = time.time()
+        while time.time() - start < duration:
+            self.publisher_.publish(self.create_stamped_msg())
+            time.sleep(dt)
         self.stop()
 
-    def turn_robot(self, duration):
-        msg = self.create_stamped_msg(angular_z=1.57)
-        self.publisher_.publish(msg)
-        time.sleep(duration) 
+    def turn_robot(self, duration, hz=100.0):
+        self.linear_x = 0.0
+        self.angular_z = 1.57
+        dt = 1.0 / hz
+        start = time.time()
+        while time.time() - start < duration:
+            self.publisher_.publish(self.create_stamped_msg())
+            time.sleep(dt)
         self.stop()
 
-    def stop(self):
-        msg = self.create_stamped_msg() # Defaults to zeros
-        self.publisher_.publish(msg)
-        time.sleep(0.5)
+    def stop(self, hz=100.0, hold=0.3):
+        self.linear_x = 0.0
+        self.angular_z = 0.0
+        dt = 1.0 / hz
+        start = time.time()
+        while time.time() - start < hold:
+            self.publisher_.publish(self.create_stamped_msg())
+            time.sleep(dt)
 
     def execute_shape(self):
-        # implementing the rectangle shape: move forward, turn, move forward, turn, move forward, turn, move forward, turn
-        for _ in range(4):
-            self.move_forward(2)  # Move forward for 2 seconds
+        big = 1.0
+        small = 0.5
+        turn_90 = 1.0
+        for _ in range(2):
+            self.move_forward(big)
             self.stop()
-            self.turn_robot(2)
-        pass
-    
+            self.turn_robot(turn_90)
+            self.stop()
+            self.move_forward(small)
+            self.stop()
+            self.turn_robot(turn_90)
 
 def main():
     rclpy.init()
