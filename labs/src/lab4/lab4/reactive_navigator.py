@@ -4,6 +4,7 @@ from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Twist
 from std_srvs.srv import SetBool
 import random
+import math
 
 # CHOICE: X
 class ReactiveNavigator(Node):
@@ -15,8 +16,8 @@ class ReactiveNavigator(Node):
         self.active = False
 
         # 2. Setup Pub/Sub
-        self.publisher_ = self.create_publisher(Twist, 'cmd_vel', 10)
-        self.subscription = self.create_subscription(LaserScan, 'scan', self.scan_callback, 10)
+        self.publisher_ = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.subscription = self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
         
         # 3. Parameter
         self.declare_parameter('safety_distance', 0.5)
@@ -24,6 +25,10 @@ class ReactiveNavigator(Node):
     def toggle_callback(self, request, response):
         # Service Callback
         self.active = request.data
+        if not self.active:
+            stop_msg = Twist()
+            self.publisher_.publish(stop_msg)
+        
         response.success = True
         response.message = f"Navigation set to {self.active}"
         return response
@@ -42,9 +47,20 @@ class ReactiveNavigator(Node):
     def execute_rotation_maneuver(self):
         # TODO: Implement Member A, B, or C rotation logic here
         self.get_logger().info("Obstacle Detected! Executing rotation maneuver.")
+        
         pass
 
     def drive_forward(self):
         msg = Twist()
         msg.linear.x = 0.05 
         self.publisher_.publish(msg)
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = ReactiveNavigator()
+    try:
+        rclpy.spin(node)
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
