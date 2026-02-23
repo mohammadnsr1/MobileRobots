@@ -23,7 +23,7 @@ class ReactiveNavigator(Node):
         self.declare_parameter('safety_distance', 0.5)
 
         # --- Task 2 state ---
-        self.trigger_distance = 0.3  # your trigger condition (Front < 0.3m)
+        self.trigger_distance = self.get_parameter('safety_distance').value  # trigger condition based on safety_distance
         self.latest_front = None
         self.latest_left = None
         self.latest_right = None
@@ -88,8 +88,8 @@ class ReactiveNavigator(Node):
         # Define sectors (degrees): adjust if your class defines different ones
         # Front: -15..+15, Left: +60..+120, Right: -120..-60
         self.latest_front = self._sector_min_distance(msg, -15.0, 15.0)
-        self.latest_left  = self._sector_min_distance(msg, 60.0, 120.0)
-        self.latest_right = self._sector_min_distance(msg, -120.0, -60.0)
+        self.latest_left  = self._sector_min_distance(msg, -135, -45)
+        self.latest_right = self._sector_min_distance(msg, 45, 135)
 
     def control_loop(self):
         if not self.active:
@@ -97,7 +97,7 @@ class ReactiveNavigator(Node):
 
         now = self.get_clock().now()
 
-        # If currently turning, keep turning until time is up
+        #If currently turning, keep turning until time is up
         if self.turning:
             if now >= self.turn_end_time:
                 self.turning = False
