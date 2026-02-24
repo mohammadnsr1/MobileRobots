@@ -1,7 +1,7 @@
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import TwistStamped
 from std_srvs.srv import SetBool
 import math
 from rclpy.duration import Duration
@@ -16,8 +16,8 @@ class ReactiveNavigator(Node):
         self.active = False
 
         # 2. Setup Pub/Sub
-        self.publisher_ = self.create_publisher(Twist, '/cmd_vel', 10)
-        self.subscription = self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
+        self.publisher_ = self.create_publisher(TwistStamped, '/robot_10/cmd_vel', 10)
+        self.subscription = self.create_subscription(LaserScan, '/robot_10/scan', self.scan_callback, 10)
 
         # 3. Parameter
         self.declare_parameter('safety_distance', 0.5)
@@ -31,7 +31,7 @@ class ReactiveNavigator(Node):
         # turning state (non-blocking)
         self.turning = False
         self.turn_end_time = None
-        self.turn_cmd = Twist()
+        self.turn_cmd = None  # TwistStamped, set in execute_rotation_maneuver
 
         # control loop at 10 Hz
         self.control_timer = self.create_timer(0.1, self.control_loop)
@@ -41,7 +41,7 @@ class ReactiveNavigator(Node):
 
         # Strongly recommended: stop immediately when disabled
         if not self.active:
-            self.publisher_.publish(Twist())
+            self._publish_twist(0.0, 0.0, 0.0)
             self.turning = False
             self.turn_end_time = None
 
@@ -60,6 +60,8 @@ class ReactiveNavigator(Node):
         """Return the minimum valid range in [start_deg, end_deg] (degrees)."""
         i0 = self.get_index_for_angle(msg, start_deg)
         i1 = self.get_index_for_angle(msg, end_deg)
+
+        # self.get_logger().info(f"min_index: {i0} | max_index: {i1}")
 
         if i0 <= i1:
             # the inner region 
@@ -84,12 +86,12 @@ class ReactiveNavigator(Node):
     def scan_callback(self, msg: LaserScan):
         if not self.active:
             return
-
         # Define sectors (degrees): adjust if your class defines different ones
         # Front: -15..+15, Left: +60..+120, Right: -120..-60
-        self.latest_front = self._sector_min_distance(msg, -15.0, 15.0)
-        self.latest_left  = self._sector_min_distance(msg, -135, -45)
-        self.latest_right = self._sector_min_distance(msg, 45, 135)
+        self.latest_front = self._sector_min_distance(msg, -120, -60)
+        self.latest_left  = self._sector_min_distance(msg, -30,30)
+        self.latest_right = self._sector_min_distance(msg, -210, -150)
+        self.get_logger().info(f"Front: {self.latest_front} | left: {self.latest_left} | right: {self.latest_right}")
 
     def control_loop(self):
         if not self.active:
@@ -101,8 +103,9 @@ class ReactiveNavigator(Node):
         if self.turning:
             if now >= self.turn_end_time:
                 self.turning = False
-                self.publisher_.publish(Twist())  # stop after the turn
+                self._publish_twist(0.0, 0.0, 0.0)  # stop after the turn
             else:
+                self.turn_cmd.header.stamp = self.get_clock().now().to_msg()
                 self.publisher_.publish(self.turn_cmd)
             return
 
@@ -123,12 +126,10 @@ class ReactiveNavigator(Node):
 
         direction = +1.0 if left_clear >= right_clear else -1.0  # + = CCW/left, - = CW/right
 
-        angular_speed = 1.57  # rad/s (tune if needed)
-        duration = (math.pi / 2.0) / angular_speed  # 90 degrees
+        angular_speed = 1.57  # rad/s 
+        duration = (math.pi / 2.0) / angular_speed 
 
-        self.turn_cmd = Twist()
-        self.turn_cmd.angular.z = direction * angular_speed
-        self.turn_cmd.linear.x = 0.0
+        self.turn_cmd = self._make_twist_stamped(0.0, 0.0, direction * angular_speed)
 
         self.turning = True
         self.turn_end_time = self.get_clock().now() + Duration(seconds=duration)
@@ -139,9 +140,19 @@ class ReactiveNavigator(Node):
         )
 
     def drive_forward(self):
-        msg = Twist()
-        msg.linear.x = 1.0
-        self.publisher_.publish(msg)
+        self._publish_twist(0.2, 0.0, 0.0)
+
+    def _make_twist_stamped(self, linear_x: float, linear_y: float, angular_z: float) -> TwistStamped:
+        msg = TwistStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = 'base_link'
+        msg.twist.linear.x = float(linear_x)
+        msg.twist.linear.y = float(linear_y)
+        msg.twist.angular.z = float(angular_z)
+        return msg
+
+    def _publish_twist(self, linear_x: float, linear_y: float, angular_z: float) -> None:
+        self.publisher_.publish(self._make_twist_stamped(linear_x, linear_y, angular_z))
 
 
 def main(args=None):
