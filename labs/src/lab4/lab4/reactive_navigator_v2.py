@@ -6,6 +6,7 @@ from std_srvs.srv import SetBool
 import math
 from rclpy.duration import Duration
 
+#option C: Smart Pivot
 
 class ReactiveNavigator(Node):
     def __init__(self):
@@ -31,7 +32,7 @@ class ReactiveNavigator(Node):
         # turning state (non-blocking)
         self.turning = False
         self.turn_end_time = None
-        self.turn_cmd = None  # TwistStamped, set in execute_rotation_maneuver
+        self.turn_cmd = None  
 
         # control loop at 10 Hz
         self.control_timer = self.create_timer(0.1, self.control_loop)
@@ -39,7 +40,6 @@ class ReactiveNavigator(Node):
     def toggle_callback(self, request, response):
         self.active = request.data
 
-        # Strongly recommended: stop immediately when disabled
         if not self.active:
             self._publish_twist(0.0, 0.0, 0.0)
             self.turning = False
@@ -86,8 +86,7 @@ class ReactiveNavigator(Node):
     def scan_callback(self, msg: LaserScan):
         if not self.active:
             return
-        # Define sectors (degrees): adjust if your class defines different ones
-        # Front: -15..+15, Left: +60..+120, Right: -120..-60
+        # Define sectors (degrees): 
         self.latest_front = self._sector_min_distance(msg, -120, -60)
         self.latest_left  = self._sector_min_distance(msg, -30,30)
         self.latest_right = self._sector_min_distance(msg, -210, -150)

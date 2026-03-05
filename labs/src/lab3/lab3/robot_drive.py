@@ -3,6 +3,7 @@ from rclpy.node import Node
 from geometry_msgs.msg import TwistStamped
 import time
 
+#option A : Rectangle
 class RobotDrive(Node):
     def __init__(self):
         super().__init__('robot_drive')
