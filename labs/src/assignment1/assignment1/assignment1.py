@@ -149,7 +149,10 @@ class CylinderPipeline:
         :param colors: Input RGB array.
         :return: Tuple of (filtered_pts, filtered_colors).
         """
-        pass
+        mask = np.all((pts >= self.cfg.box_min) & (pts <= self.cfg.box_max), axis=1)
+        filtered_pts = pts[mask]
+        filtered_colors = colors[mask]
+        return filtered_pts, filtered_colors
 
     def downsample(self, pts, colors):
         """
@@ -158,7 +161,13 @@ class CylinderPipeline:
         Implementation Hint: Convert points to integer coordinates by dividing 
         by voxel_size, then use np.unique to find one point per voxel.
         """
-        pass
+        if len(pts) == 0:
+            return pts, colors
+
+        voxel_coords = np.floor(pts / self.cfg.voxel_size).astype(np.int32)
+        _, unique_indices = np.unique(voxel_coords, axis=0, return_index=True)
+        unique_indices.sort()
+        return pts[unique_indices], colors[unique_indices]
 
     def estimate_normals(self, pts, k=15):
         """
@@ -169,7 +178,24 @@ class CylinderPipeline:
         2. Compute the Singular Value Decomposition (SVD), using np.linalg.svd, of the centered neighbors.
         3. The normal is the eigenvector corresponding to the smallest eigenvalue.
         """
-        pass
+        if len(pts) == 0:
+            return np.empty((0, 3), dtype=np.float32)
+
+        neighbor_idxs = self.get_neighbors(pts, pts, k=k)
+        if neighbor_idxs is None:
+            return np.zeros((len(pts), 3), dtype=np.float32)
+
+        normals = np.zeros((len(pts), 3), dtype=np.float32)
+        for i, idxs in enumerate(neighbor_idxs):
+            neighbors = pts[idxs]
+            centered = neighbors - neighbors.mean(axis=0)
+            _, _, vh = np.linalg.svd(centered, full_matrices=False)
+            normal = vh[-1]
+            norm = np.linalg.norm(normal)
+            if norm > 0:
+                normals[i] = normal / norm
+
+        return normals
 
     def find_plane_ransac(self, pts, iters=100):
         """
@@ -181,7 +207,49 @@ class CylinderPipeline:
         3. Count how many points are within self.cfg.floor_dist of the plane.
         4. Return the model with the most inliers.
         """
-        pass
+        if len(pts) < 3:
+            return None, None
+
+        target_normal = np.asarray(self.cfg.target_normal, dtype=np.float64)
+        target_norm = np.linalg.norm(target_normal)
+        if target_norm <= 1e-12:
+            return None, None
+        target_normal = target_normal / target_norm
+
+        best_model = None
+        best_inliers = None
+        best_count = 0
+
+        for _ in range(iters):
+            sample_idxs = np.random.choice(len(pts), size=3, replace=False)
+            p1, p2, p3 = pts[sample_idxs]
+
+            v1 = p2 - p1
+            v2 = p3 - p1
+            normal = np.cross(v1, v2)
+            normal_norm = np.linalg.norm(normal)
+            if normal_norm <= 1e-12:
+                continue
+
+            normal = normal / normal_norm
+            alignment = abs(np.dot(normal, target_normal))
+            if alignment < self.cfg.normal_thresh:
+                continue
+
+            d = -np.dot(normal, p1)
+            distances = np.abs(pts @ normal + d)
+            inliers = distances <= self.cfg.floor_dist
+            inlier_count = np.count_nonzero(inliers)
+
+            if inlier_count > best_count:
+                best_count = inlier_count
+                best_model = (normal, d)
+                best_inliers = inliers
+
+        if best_model is None:
+            return None, None
+
+        return best_model, best_inliers
 
     def find_single_cylinder(self, pts, normals, iters=300):
         """
@@ -193,7 +261,68 @@ class CylinderPipeline:
         3. Check axis alignment with the vertical.
         4. Project points and find distance to the axis; compare to self.cfg.cyl_radius.
         """
-        pass
+        if len(pts) < 2:
+            return None, None
+
+        vertical = np.asarray(self.cfg.target_normal, dtype=np.float64)
+        vertical_norm = np.linalg.norm(vertical)
+        if vertical_norm <= 1e-12:
+            return None, None
+        vertical = vertical / vertical_norm
+
+        radius = float(self.cfg.cyl_radius)
+        dist_thresh = float(self.cfg.floor_dist)
+
+        best_model = None
+        best_inliers = None
+        best_count = 0
+
+        for _ in range(iters):
+            sample_idxs = np.random.choice(len(pts), size=2, replace=False)
+            p1, p2 = pts[sample_idxs]
+            n1, n2 = normals[sample_idxs]
+
+            n1_norm = np.linalg.norm(n1)
+            n2_norm = np.linalg.norm(n2)
+            if n1_norm <= 1e-12 or n2_norm <= 1e-12:
+                continue
+
+            n1_unit = n1 / n1_norm
+            n2_unit = n2 / n2_norm
+
+            axis = np.cross(n1, n2)
+            axis_norm = np.linalg.norm(axis)
+            if axis_norm <= 1e-12:
+                continue
+
+            axis = axis / axis_norm
+            alignment = abs(np.dot(axis, vertical))
+            if alignment < self.cfg.normal_thresh:
+                continue
+
+            if np.dot(axis, vertical) < 0:
+                axis = -axis
+
+            c1 = p1 - radius * n1_unit
+            c2 = p2 - radius * n2_unit
+            center = 0.5 * (c1 + c2)
+
+            v = pts - center
+            radial_vec = v - np.outer(v @ axis, axis)
+            radial_distance = np.linalg.norm(radial_vec, axis=1)
+
+            inliers = np.abs(radial_distance - radius) <= dist_thresh
+            inlier_count = np.count_nonzero(inliers)
+
+            if inlier_count > best_count:
+                best_count = inlier_count
+                best_model = (center, axis, radius)
+                best_inliers = inliers
+
+        if best_model is None:
+            return None, None
+
+        return best_model, best_inliers
 
 # ==========================================
 # ROS NODE
@@ -264,13 +393,37 @@ class CylinderProcessorNode(Node):
             (rgb_uint32 & 0xFF) / 255.0          # Blue
         ]).T
 
-        # TODO: Implement the call sequence:
-        # pts_box, colors_box = self.pipeline.box_filter(pts, raw_colors)
-        # pts_v, colors_v = self.pipeline.downsample(pts_box, colors_box)
-        # ...
-        
+        pts_box, colors_box = self.pipeline.box_filter(pts, raw_colors)
+        pts_v, colors_v = self.pipeline.downsample(pts_box, colors_box)
+        plane_model, plane_inliers = self.pipeline.find_plane_ransac(pts_v)
+
+        pts_candidates = pts_v
+        colors_candidates = colors_v
+        if plane_model is not None:
+            pts_plane = pts_v[plane_inliers]
+            colors_plane = colors_v[plane_inliers]
+            pts_candidates = pts_v[~plane_inliers]
+            colors_candidates = colors_v[~plane_inliers]
+        else:
+            pts_plane = np.empty((0, 3), dtype=np.float32)
+            colors_plane = np.empty((0, 3), dtype=np.float32)
+
+        self.pub_stage0.publish(self.numpy_to_pc2_rgb(pts_plane, colors_plane, frame_id))
+
         # Final detections format: list of ((center, axis, radius), rgb_color, name)
         detected_cylinders = [] 
+        normals_candidates = self.pipeline.estimate_normals(pts_candidates)
+        cyl_model, cyl_inliers = self.pipeline.find_single_cylinder(pts_candidates, normals_candidates)
+
+        if cyl_model is not None and cyl_inliers is not None and np.any(cyl_inliers):
+            pts_cylinder = pts_candidates[cyl_inliers]
+            colors_cylinder = colors_candidates[cyl_inliers]
+            detected_cylinders.append((cyl_model, np.array([1.0, 0.2, 0.2]), 'cylinder'))
+        else:
+            pts_cylinder = np.empty((0, 3), dtype=np.float32)
+            colors_cylinder = np.empty((0, 3), dtype=np.float32)
+        
+        self.pub_stage3.publish(self.numpy_to_pc2_rgb(pts_cylinder, colors_cylinder, frame_id))
         
         self.visualizer.publish_viz(detected_cylinders, frame_id)
 
