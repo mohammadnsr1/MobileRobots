@@ -25,8 +25,8 @@ class PipelineConfig:
         self.voxel_size = 0.02
         
         # Passthrough/Box Filter (Min/Max XYZ)
-        self.box_min = np.array([-1.0, -0.6, 0.2]) 
-        self.box_max = np.array([ 1.0,  0.6, 2.0]) 
+        self.box_min = np.array([-0.4, -2.0, 0.2]) 
+        self.box_max = np.array([ 0.4,  1.0, 2.0]) 
 
         # Plane RANSAC
         self.floor_dist = 0.02
@@ -408,21 +408,53 @@ class CylinderProcessorNode(Node):
             pts_plane = np.empty((0, 3), dtype=np.float32)
             colors_plane = np.empty((0, 3), dtype=np.float32)
 
-        self.pub_stage0.publish(self.numpy_to_pc2_rgb(pts_plane, colors_plane, frame_id))
+        self.pub_stage0.publish(self.numpy_to_pc2_rgb(pts_plane , colors_plane, frame_id))
 
         # Final detections format: list of ((center, axis, radius), rgb_color, name)
-        detected_cylinders = [] 
-        normals_candidates = self.pipeline.estimate_normals(pts_candidates)
-        cyl_model, cyl_inliers = self.pipeline.find_single_cylinder(pts_candidates, normals_candidates)
+        min_cylinder_inliers = 30
+        display_colors = [
+            np.array([1.0, 0.2, 0.2], dtype=np.float32),
+            np.array([0.2, 1.0, 0.2], dtype=np.float32),
+            np.array([0.2, 0.4, 1.0], dtype=np.float32),
+        ]
 
-        if cyl_model is not None and cyl_inliers is not None and np.any(cyl_inliers):
-            pts_cylinder = pts_candidates[cyl_inliers]
-            colors_cylinder = colors_candidates[cyl_inliers]
-            detected_cylinders.append((cyl_model, np.array([1.0, 0.2, 0.2]), 'cylinder'))
+        remaining_pts = pts_candidates
+        remaining_colors = colors_candidates
+        detected_cylinders = []
+        debug_cloud_pts = []
+        debug_cloud_colors = []
+
+        for i in range(self.cfg.max_cylinders):
+            if len(remaining_pts) < min_cylinder_inliers:
+                break
+
+            normals_remaining = self.pipeline.estimate_normals(remaining_pts)
+            cyl_model, cyl_inliers = self.pipeline.find_single_cylinder(remaining_pts, normals_remaining)
+
+            if cyl_model is None or cyl_inliers is None:
+                break
+
+            inlier_count = np.count_nonzero(cyl_inliers)
+            if inlier_count < min_cylinder_inliers:
+                break
+
+            cyl_pts = remaining_pts[cyl_inliers]
+            display_color = display_colors[i % len(display_colors)]
+
+            detected_cylinders.append((cyl_model, display_color, f'cylinder_{i}'))
+            debug_cloud_pts.append(cyl_pts)
+            debug_cloud_colors.append(np.tile(display_color, (len(cyl_pts), 1)))
+
+            remaining_pts = remaining_pts[~cyl_inliers]
+            remaining_colors = remaining_colors[~cyl_inliers]
+
+        if debug_cloud_pts:
+            pts_cylinder = np.concatenate(debug_cloud_pts, axis=0)
+            colors_cylinder = np.concatenate(debug_cloud_colors, axis=0)
         else:
             pts_cylinder = np.empty((0, 3), dtype=np.float32)
             colors_cylinder = np.empty((0, 3), dtype=np.float32)
-        
+
         self.pub_stage3.publish(self.numpy_to_pc2_rgb(pts_cylinder, colors_cylinder, frame_id))
         
         self.visualizer.publish_viz(detected_cylinders, frame_id)
