@@ -362,6 +362,13 @@ class CylinderPipeline:
 
         return best_model, best_inliers
 
+    def cylinder_exclusion_mask(self, pts, model, inflation=0.02):
+        center, axis, radius = model
+        v = pts - center
+        radial_vec = v - np.outer(v @ axis, axis)
+        radial_distance = np.linalg.norm(radial_vec, axis=1)
+        return radial_distance <= (radius + inflation)
+
 # ==========================================
 # ROS NODE
 # ==========================================
@@ -449,11 +456,13 @@ class CylinderProcessorNode(Node):
      
 
         # Final detections format: list of ((center, axis, radius), rgb_color, name)
-        min_cylinder_inliers = 30
-        visited_mask = np.zeros(len(pts_candidates), dtype=bool)
+        # Higher inlier threshold rejects partial duplicate fits on the same cylinder.
+        min_cylinder_inliers = 100
         remaining_pts = pts_candidates
         remaining_colors = colors_candidates
         detected_cylinders = []
+        debug_cylinder_pts = []
+        debug_cylinder_colors = []
 
         for i in range(self.cfg.max_cylinders):
             if len(remaining_pts) < min_cylinder_inliers:
@@ -470,19 +479,27 @@ class CylinderProcessorNode(Node):
 
             inlier_count = np.count_nonzero(cyl_inliers)
             if inlier_count < min_cylinder_inliers:
-                break
+                continue
+        
+            inlier_pts = remaining_pts[cyl_inliers]
             inlier_colors = remaining_colors[cyl_inliers]
             display_color, color_name = self.pipeline.classify_cylinder_color(inlier_colors)
             detected_cylinders.append((cyl_model, display_color, color_name))
+            debug_cylinder_pts.append(inlier_pts)
+            debug_cylinder_colors.append(inlier_colors)
 
-            remaining_indices = np.flatnonzero(~visited_mask)
-            visited_mask[remaining_indices[cyl_inliers]] = True
+            exclusion_mask = self.pipeline.cylinder_exclusion_mask(
+                remaining_pts, cyl_model, inflation=0.02
+            )
+            remaining_pts = remaining_pts[~exclusion_mask]
+            remaining_colors = remaining_colors[~exclusion_mask]
 
-            remaining_pts = pts_candidates[~visited_mask]
-            remaining_colors = colors_candidates[~visited_mask]
-
-        pts_cylinder = pts_candidates[visited_mask]
-        colors_cylinder = colors_candidates[visited_mask]
+        if debug_cylinder_pts:
+            pts_cylinder = np.concatenate(debug_cylinder_pts, axis=0)
+            colors_cylinder = np.concatenate(debug_cylinder_colors, axis=0)
+        else:
+            pts_cylinder = np.empty((0, 3), dtype=pts_candidates.dtype)
+            colors_cylinder = np.empty((0, 3), dtype=colors_candidates.dtype)
         self.pub_stage3.publish(self.numpy_to_pc2_rgb(pts_cylinder, colors_cylinder, frame_id))
         
         self.visualizer.publish_viz(detected_cylinders, frame_id)
