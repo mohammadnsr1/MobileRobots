@@ -1,5 +1,3 @@
-import argparse
-from math import floor
 import numpy as np
 from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation as R
@@ -28,7 +26,7 @@ class PipelineConfig:
         
         # Passthrough/Box Filter (Min/Max XYZ)
         self.box_min = np.array([-0.6, -2.0, 0.2]) 
-        self.box_max = np.array([ 0.6,  1.0, 2.0]) 
+        self.box_max = np.array([ 0.6,  1.0, 1.5]) 
 
         # Plane RANSAC
         self.floor_dist = 0.02
@@ -128,6 +126,47 @@ class CylinderPipeline:
         v = mx
         
         return h, s, v
+
+    def classify_cylinder_color(self, colors):
+        """
+        Classifies a cylinder color in HSV space using its inlier point colors.
+
+        :param colors: Nx3 RGB array with values in [0, 1].
+        :return: Tuple of (display_rgb, color_name).
+        """
+        unknown_rgb = np.array([1.0, 1.0, 1.0], dtype=np.float32)
+        if len(colors) == 0:
+            return unknown_rgb, "unknown"
+
+        hsv_values = np.array(
+            [self.rgb_to_hsv(r, g, b) for r, g, b in colors],
+            dtype=np.float32
+        )
+
+        valid_mask = (hsv_values[:, 1] >= 0.25) & (hsv_values[:, 2] >= 0.15)
+        hsv_values = hsv_values[valid_mask]
+        if len(hsv_values) == 0:
+            return unknown_rgb, "unknown"
+
+        hues = hsv_values[:, 0]
+        red_count = np.count_nonzero((hues < 25.0) | (hues >= 335.0))
+        green_count = np.count_nonzero((hues >= 80.0) & (hues < 170.0))
+        blue_count = np.count_nonzero((hues >= 190.0) & (hues < 280.0))
+
+        counts = {
+            "red": red_count,
+            "green": green_count,
+            "blue": blue_count,
+        }
+        color_name = max(counts, key=counts.get)
+        if counts[color_name] == 0:
+            return unknown_rgb, "unknown"
+
+        if color_name == "red":
+            return np.array([1.0, 0.2, 0.2], dtype=np.float32), "red"
+        if color_name == "green":
+            return np.array([0.2, 1.0, 0.2], dtype=np.float32), "green"
+        return np.array([0.2, 0.4, 1.0], dtype=np.float32), "blue"
 
     def get_neighbors(self, pts, queries, k=15):
         """
@@ -395,6 +434,7 @@ class CylinderProcessorNode(Node):
         pts_box, colors_box = self.pipeline.box_filter(pts, raw_colors)
         pts_v, colors_v = self.pipeline.downsample(pts_box, colors_box)
         floor_model, floor_inliers = self.pipeline.find_plane_ransac(pts_v)
+        
 
         pts_candidates = pts_v
         colors_candidates = colors_v
@@ -403,18 +443,13 @@ class CylinderProcessorNode(Node):
             colors_floor = colors_v[floor_inliers]
             pts_candidates = pts_v[~floor_inliers]
             colors_candidates = colors_v[~floor_inliers]
-            self.pub_stage0.publish(self.numpy_to_pc2_rgb(pts_floor , colors_floor, frame_id))
+            self.pub_stage0.publish(self.numpy_to_pc2_rgb(pts_box , colors_box, frame_id))
         else:
             self.pub_stage0.publish(self.numpy_to_pc2_rgb(pts_v , colors_v, frame_id))
+     
 
         # Final detections format: list of ((center, axis, radius), rgb_color, name)
         min_cylinder_inliers = 30
-        display_colors = [
-            np.array([1.0, 0.2, 0.2], dtype=np.float32),
-            np.array([0.2, 1.0, 0.2], dtype=np.float32),
-            np.array([0.2, 0.4, 1.0], dtype=np.float32),
-        ]
-
         visited_mask = np.zeros(len(pts_candidates), dtype=bool)
         remaining_pts = pts_candidates
         remaining_colors = colors_candidates
@@ -436,8 +471,9 @@ class CylinderProcessorNode(Node):
             inlier_count = np.count_nonzero(cyl_inliers)
             if inlier_count < min_cylinder_inliers:
                 break
-            display_color = display_colors[i % len(display_colors)]
-            detected_cylinders.append((cyl_model, display_color, f'cylinder_{i}'))
+            inlier_colors = remaining_colors[cyl_inliers]
+            display_color, color_name = self.pipeline.classify_cylinder_color(inlier_colors)
+            detected_cylinders.append((cyl_model, display_color, color_name))
 
             remaining_indices = np.flatnonzero(~visited_mask)
             visited_mask[remaining_indices[cyl_inliers]] = True
