@@ -1,4 +1,5 @@
 import argparse
+from math import floor
 import numpy as np
 from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation as R
@@ -8,6 +9,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import PointCloud2, PointField
 from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Point
+
 
 # ==========================================
 # CONFIGURATION CLASS
@@ -25,8 +27,8 @@ class PipelineConfig:
         self.voxel_size = 0.02
         
         # Passthrough/Box Filter (Min/Max XYZ)
-        self.box_min = np.array([-0.4, -2.0, 0.2]) 
-        self.box_max = np.array([ 0.4,  1.0, 2.0]) 
+        self.box_min = np.array([-0.6, -2.0, 0.2]) 
+        self.box_max = np.array([ 0.6,  1.0, 2.0]) 
 
         # Plane RANSAC
         self.floor_dist = 0.02
@@ -179,11 +181,11 @@ class CylinderPipeline:
         3. The normal is the eigenvector corresponding to the smallest eigenvalue.
         """
         if len(pts) == 0:
-            return np.empty((0, 3), dtype=np.float32)
+            return None
 
         neighbor_idxs = self.get_neighbors(pts, pts, k=k)
         if neighbor_idxs is None:
-            return np.zeros((len(pts), 3), dtype=np.float32)
+            return None
 
         normals = np.zeros((len(pts), 3), dtype=np.float32)
         for i, idxs in enumerate(neighbor_idxs):
@@ -211,10 +213,7 @@ class CylinderPipeline:
             return None, None
 
         target_normal = np.asarray(self.cfg.target_normal, dtype=np.float64)
-        target_norm = np.linalg.norm(target_normal)
-        if target_norm <= 1e-12:
-            return None, None
-        target_normal = target_normal / target_norm
+        target_normal = target_normal
 
         best_model = None
         best_inliers = None
@@ -395,20 +394,18 @@ class CylinderProcessorNode(Node):
 
         pts_box, colors_box = self.pipeline.box_filter(pts, raw_colors)
         pts_v, colors_v = self.pipeline.downsample(pts_box, colors_box)
-        plane_model, plane_inliers = self.pipeline.find_plane_ransac(pts_v)
+        floor_model, floor_inliers = self.pipeline.find_plane_ransac(pts_v)
 
         pts_candidates = pts_v
         colors_candidates = colors_v
-        if plane_model is not None:
-            pts_plane = pts_v[plane_inliers]
-            colors_plane = colors_v[plane_inliers]
-            pts_candidates = pts_v[~plane_inliers]
-            colors_candidates = colors_v[~plane_inliers]
+        if floor_model is not None:
+            pts_floor = pts_v[floor_inliers]
+            colors_floor = colors_v[floor_inliers]
+            pts_candidates = pts_v[~floor_inliers]
+            colors_candidates = colors_v[~floor_inliers]
+            self.pub_stage0.publish(self.numpy_to_pc2_rgb(pts_floor , colors_floor, frame_id))
         else:
-            pts_plane = np.empty((0, 3), dtype=np.float32)
-            colors_plane = np.empty((0, 3), dtype=np.float32)
-
-        self.pub_stage0.publish(self.numpy_to_pc2_rgb(pts_plane , colors_plane, frame_id))
+            self.pub_stage0.publish(self.numpy_to_pc2_rgb(pts_v , colors_v, frame_id))
 
         # Final detections format: list of ((center, axis, radius), rgb_color, name)
         min_cylinder_inliers = 30
@@ -418,17 +415,19 @@ class CylinderProcessorNode(Node):
             np.array([0.2, 0.4, 1.0], dtype=np.float32),
         ]
 
+        visited_mask = np.zeros(len(pts_candidates), dtype=bool)
         remaining_pts = pts_candidates
         remaining_colors = colors_candidates
         detected_cylinders = []
-        debug_cloud_pts = []
-        debug_cloud_colors = []
 
         for i in range(self.cfg.max_cylinders):
             if len(remaining_pts) < min_cylinder_inliers:
                 break
 
             normals_remaining = self.pipeline.estimate_normals(remaining_pts)
+            if normals_remaining is None:
+                break
+
             cyl_model, cyl_inliers = self.pipeline.find_single_cylinder(remaining_pts, normals_remaining)
 
             if cyl_model is None or cyl_inliers is None:
@@ -437,24 +436,17 @@ class CylinderProcessorNode(Node):
             inlier_count = np.count_nonzero(cyl_inliers)
             if inlier_count < min_cylinder_inliers:
                 break
-
-            cyl_pts = remaining_pts[cyl_inliers]
             display_color = display_colors[i % len(display_colors)]
-
             detected_cylinders.append((cyl_model, display_color, f'cylinder_{i}'))
-            debug_cloud_pts.append(cyl_pts)
-            debug_cloud_colors.append(np.tile(display_color, (len(cyl_pts), 1)))
 
-            remaining_pts = remaining_pts[~cyl_inliers]
-            remaining_colors = remaining_colors[~cyl_inliers]
+            remaining_indices = np.flatnonzero(~visited_mask)
+            visited_mask[remaining_indices[cyl_inliers]] = True
 
-        if debug_cloud_pts:
-            pts_cylinder = np.concatenate(debug_cloud_pts, axis=0)
-            colors_cylinder = np.concatenate(debug_cloud_colors, axis=0)
-        else:
-            pts_cylinder = np.empty((0, 3), dtype=np.float32)
-            colors_cylinder = np.empty((0, 3), dtype=np.float32)
+            remaining_pts = pts_candidates[~visited_mask]
+            remaining_colors = colors_candidates[~visited_mask]
 
+        pts_cylinder = pts_candidates[visited_mask]
+        colors_cylinder = colors_candidates[visited_mask]
         self.pub_stage3.publish(self.numpy_to_pc2_rgb(pts_cylinder, colors_cylinder, frame_id))
         
         self.visualizer.publish_viz(detected_cylinders, frame_id)
