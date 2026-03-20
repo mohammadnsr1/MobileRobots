@@ -1,3 +1,5 @@
+from collections import deque
+
 import numpy as np
 from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation as R
@@ -5,6 +7,7 @@ from scipy.spatial.transform import Rotation as R
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import PointCloud2, PointField
+from std_msgs import msg
 from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Point
 
@@ -30,8 +33,15 @@ class PipelineConfig:
 
         # Plane RANSAC
         self.floor_dist = 0.02
+        self.cyl_dist = 0.01
         self.target_normal = np.array([0, 1, 0]) # Assuming Y-up for floor
         self.normal_thresh = 0.85
+
+        # Euclidean clustering
+        self.cluster_k = 15
+        self.cluster_tolerance = 0.06
+        self.min_cluster_size = 100
+        self.max_cluster_size = 1000
         
         # Cylinder RANSAC
         self.cyl_radius = 0.055
@@ -129,44 +139,43 @@ class CylinderPipeline:
 
     def classify_cylinder_color(self, colors):
         """
-        Classifies a cylinder color in HSV space using its inlier point colors.
+        Classify a verified cylinder cluster by averaging its RGB colors,
+        converting the average to HSV, and thresholding in HSV space.
 
-        :param colors: Nx3 RGB array with values in [0, 1].
-        :return: Tuple of (display_rgb, color_name).
+        :param colors: Nx3 RGB array with values in [0, 1]
+        :return: (display_rgb, color_name)
         """
         unknown_rgb = np.array([1.0, 1.0, 1.0], dtype=np.float32)
-        if len(colors) == 0:
+
+        if colors is None or len(colors) == 0:
             return unknown_rgb, "unknown"
 
-        hsv_values = np.array(
-            [self.rgb_to_hsv(r, g, b) for r, g, b in colors],
-            dtype=np.float32
-        )
+        # Average RGB over the cylinder cluster / inlier points
+        avg_rgb = np.mean(colors, axis=0).astype(np.float32)
 
-        valid_mask = (hsv_values[:, 1] >= 0.25) & (hsv_values[:, 2] >= 0.15)
-        hsv_values = hsv_values[valid_mask]
-        if len(hsv_values) == 0:
+        # Clamp just in case
+        avg_rgb = np.clip(avg_rgb, 0.0, 1.0)
+
+        # Convert average RGB to HSV
+        h, s, v = self.rgb_to_hsv(avg_rgb[0], avg_rgb[1], avg_rgb[2])
+
+        # Reject very dark or nearly gray colors
+        if v < 0.15:
             return unknown_rgb, "unknown"
 
-        hues = hsv_values[:, 0]
-        red_count = np.count_nonzero((hues < 25.0) | (hues >= 335.0))
-        green_count = np.count_nonzero((hues >= 80.0) & (hues < 170.0))
-        blue_count = np.count_nonzero((hues >= 190.0) & (hues < 280.0))
-
-        counts = {
-            "red": red_count,
-            "green": green_count,
-            "blue": blue_count,
-        }
-        color_name = max(counts, key=counts.get)
-        if counts[color_name] == 0:
-            return unknown_rgb, "unknown"
-
-        if color_name == "red":
+        # Pink: red-ish hue, bright, but lower saturation than strong red
+        if ((h < 25.0) or (h >= 335.0)):
+            if s < 0.45 and v > 0.5:
+                return np.array([1.0, 0.5, 0.7], dtype=np.float32), "pink"
             return np.array([1.0, 0.2, 0.2], dtype=np.float32), "red"
-        if color_name == "green":
+
+        if 80.0 <= h < 170.0:
             return np.array([0.2, 1.0, 0.2], dtype=np.float32), "green"
-        return np.array([0.2, 0.4, 1.0], dtype=np.float32), "blue"
+
+        if 190.0 <= h < 280.0:
+            return np.array([0.2, 0.4, 1.0], dtype=np.float32), "blue"
+
+        return unknown_rgb, "unknown"
 
     def get_neighbors(self, pts, queries, k=15):
         """
@@ -309,7 +318,7 @@ class CylinderPipeline:
         vertical = vertical / vertical_norm
 
         radius = float(self.cfg.cyl_radius)
-        dist_thresh = float(self.cfg.floor_dist)
+        dist_thresh = float(self.cfg.cyl_dist)
 
         best_model = None
         best_inliers = None
@@ -343,9 +352,9 @@ class CylinderPipeline:
 
             c1 = p1 - radius * n1_unit
             c2 = p2 - radius * n2_unit
-            center = 0.5 * (c1 + c2)
+            axis_point = 0.5 * (c1 + c2)
 
-            v = pts - center
+            v = pts - axis_point
             radial_vec = v - np.outer(v @ axis, axis)
             radial_distance = np.linalg.norm(radial_vec, axis=1)
 
@@ -354,7 +363,7 @@ class CylinderPipeline:
 
             if inlier_count > best_count:
                 best_count = inlier_count
-                best_model = (center, axis, radius)
+                best_model = (axis_point, axis, radius)
                 best_inliers = inliers
 
         if best_model is None:
@@ -362,12 +371,57 @@ class CylinderPipeline:
 
         return best_model, best_inliers
 
-    def cylinder_exclusion_mask(self, pts, model, inflation=0.02):
-        center, axis, radius = model
-        v = pts - center
-        radial_vec = v - np.outer(v @ axis, axis)
-        radial_distance = np.linalg.norm(radial_vec, axis=1)
-        return radial_distance <= (radius + inflation)
+    def euclidean_clustering(self, pts):
+        """
+        Groups nearby points into connected components using kNN expansion.
+        """
+        if len(pts) == 0:
+            return []
+
+        cluster_k = min(int(self.cfg.cluster_k), len(pts))
+        if cluster_k <= 0:
+            return []
+
+        neighbor_idxs = self.get_neighbors(pts, pts, k=cluster_k)
+        if neighbor_idxs is None:
+            return []
+
+        neighbor_idxs = np.atleast_2d(neighbor_idxs)
+        cluster_tol_sq = float(self.cfg.cluster_tolerance) ** 2
+        valid_neighbors = []
+
+        for i, idxs in enumerate(neighbor_idxs):
+            deltas = pts[idxs] - pts[i]
+            dist_sq = np.sum(deltas * deltas, axis = 1)
+            valid_neighbors.append(idxs[dist_sq <= cluster_tol_sq])
+
+        visited = np.zeros(len(pts), dtype=bool)
+        clusters = []
+
+        for start_idx in range(len(pts)):
+            if visited[start_idx]:
+                continue
+
+            queue = deque([start_idx])
+            visited[start_idx] = True
+            cluster = []
+
+            while queue:
+                idx = queue.popleft()
+                cluster.append(idx)
+
+                for neighbor_idx in valid_neighbors[idx]:
+                    neighbor_idx = int(neighbor_idx)
+                    if visited[neighbor_idx]:
+                        continue
+                    visited[neighbor_idx] = True
+                    queue.append(neighbor_idx)
+
+            cluster_size = len(cluster)
+            if self.cfg.min_cluster_size <= cluster_size <= self.cfg.max_cluster_size:
+                clusters.append(np.asarray(cluster, dtype=np.int32))
+
+        return clusters
 
 # ==========================================
 # ROS NODE
@@ -446,56 +500,62 @@ class CylinderProcessorNode(Node):
         pts_candidates = pts_v
         colors_candidates = colors_v
         if floor_model is not None:
-            pts_floor = pts_v[floor_inliers]
-            colors_floor = colors_v[floor_inliers]
             pts_candidates = pts_v[~floor_inliers]
             colors_candidates = colors_v[~floor_inliers]
             self.pub_stage0.publish(self.numpy_to_pc2_rgb(pts_box , colors_box, frame_id))
         else:
             self.pub_stage0.publish(self.numpy_to_pc2_rgb(pts_v , colors_v, frame_id))
-     
+
+        clusters = self.pipeline.euclidean_clustering(pts_candidates)
+        self.get_logger().info(
+            f"Euclidean clusters after floor removal: {len(clusters)}"
+        )
 
         # Final detections format: list of ((center, axis, radius), rgb_color, name)
         # Higher inlier threshold rejects partial duplicate fits on the same cylinder.
-        min_cylinder_inliers = 120
-        remaining_pts = pts_candidates
-        remaining_colors = colors_candidates
+        min_cylinder_inliers = 80
         detected_cylinders = []
         debug_cylinder_pts = []
         debug_cylinder_colors = []
 
-        for i in range(self.cfg.max_cylinders):
-            if len(remaining_pts) < min_cylinder_inliers:
-                break
+        for cluster_idx, idxs in enumerate(clusters):
+            cluster_pts = pts_candidates[idxs]
+            cluster_colors = colors_candidates[idxs]
+            cluster_size = len(cluster_pts)
+            self.get_logger().info(f"Cluster {cluster_idx}: size={cluster_size}")
 
-            normals_remaining = self.pipeline.estimate_normals(remaining_pts)
-            if normals_remaining is None:
-                break
+            if cluster_size < min_cylinder_inliers:
+                self.get_logger().info(
+                    f"Cluster {cluster_idx}: rejected, inliers=0"
+                )
+                continue
 
-            cyl_model, cyl_inliers = self.pipeline.find_single_cylinder(remaining_pts, normals_remaining)
+            normals_cluster = self.pipeline.estimate_normals(cluster_pts)
+            if normals_cluster is None:
+                self.get_logger().info(
+                    f"Cluster {cluster_idx}: rejected, inliers=0"
+                )
+                continue
 
+            cyl_model, cyl_inliers = self.pipeline.find_single_cylinder(
+                cluster_pts, normals_cluster
+            )
             if cyl_model is None or cyl_inliers is None:
-                break
+                self.get_logger().info(
+                    f"Cluster {cluster_idx}: rejected, inliers=0"
+                )
+                continue
 
             inlier_count = np.count_nonzero(cyl_inliers)
-            if inlier_count < min_cylinder_inliers:
-                continue
-        
-            inlier_pts = remaining_pts[cyl_inliers]
-            # self.get_logger().info(f"inlier_pts length: {len(inlier_pts)}")
-            
-            
-            inlier_colors = remaining_colors[cyl_inliers]
+            inlier_pts = cluster_pts[cyl_inliers]
+            inlier_colors = cluster_colors[cyl_inliers]
             display_color, color_name = self.pipeline.classify_cylinder_color(inlier_colors)
             detected_cylinders.append((cyl_model, display_color, color_name))
             debug_cylinder_pts.append(inlier_pts)
             debug_cylinder_colors.append(inlier_colors)
-
-            exclusion_mask = self.pipeline.cylinder_exclusion_mask(
-                remaining_pts, cyl_model, inflation=0.02
+            self.get_logger().info(
+                f"Cluster {cluster_idx}: accepted, inliers={inlier_count}"
             )
-            remaining_pts = remaining_pts[~exclusion_mask]
-            remaining_colors = remaining_colors[~exclusion_mask]
 
         if debug_cylinder_pts:
             pts_cylinder = np.concatenate(debug_cylinder_pts, axis=0)
