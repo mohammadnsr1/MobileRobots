@@ -26,7 +26,7 @@ class PipelineConfig:
         
         # Passthrough/Box Filter (Min/Max XYZ)
         self.box_min = np.array([-0.6, -2.0, 0.2]) 
-        self.box_max = np.array([ 0.6,  1.0, 1.5]) 
+        self.box_max = np.array([ 0.6,  1.0, 2.0]) 
 
         # Plane RANSAC
         self.floor_dist = 0.02
@@ -457,7 +457,7 @@ class CylinderProcessorNode(Node):
 
         # Final detections format: list of ((center, axis, radius), rgb_color, name)
         # Higher inlier threshold rejects partial duplicate fits on the same cylinder.
-        min_cylinder_inliers = 100
+        min_cylinder_inliers = 120
         remaining_pts = pts_candidates
         remaining_colors = colors_candidates
         detected_cylinders = []
@@ -482,6 +482,9 @@ class CylinderProcessorNode(Node):
                 continue
         
             inlier_pts = remaining_pts[cyl_inliers]
+            # self.get_logger().info(f"inlier_pts length: {len(inlier_pts)}")
+            
+            
             inlier_colors = remaining_colors[cyl_inliers]
             display_color, color_name = self.pipeline.classify_cylinder_color(inlier_colors)
             detected_cylinders.append((cyl_model, display_color, color_name))
