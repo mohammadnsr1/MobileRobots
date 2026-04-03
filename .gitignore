@@ -213,5 +213,6 @@ labs/log/
 labs/install/
 labs/src/ras598_sim/
 labs/src/gz_ros2_control/
-
+labs/src/stage_ros2/
+labs/src/Stage/
 
