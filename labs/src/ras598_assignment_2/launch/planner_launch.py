@@ -7,7 +7,7 @@ from launch.actions import ExecuteProcess  # <--- Added this
 def main():
     # Helper to handle the home directory path
     home = os.path.expanduser('~')
-    map_yaml_path = os.path.join(home, 'coursework/MobileRobots/labs/src/ras598_assignment_2/map.yaml')
+    map_yaml_path = os.path.join(home, 'coursework/MobileRobots/labs/src/ras598_assignment_2/maps/map.yaml')
     scout_script_path = os.path.join(home, 'coursework/MobileRobots/labs/src/ras598_assignment_2/grading_scout.py')
 
     ld = LaunchDescription([
