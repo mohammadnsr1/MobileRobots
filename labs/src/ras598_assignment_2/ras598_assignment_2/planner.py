@@ -13,6 +13,8 @@ from nav_msgs.msg import Odometry
 from std_msgs.msg import Float32
 from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Point
+from nav_msgs.msg import Path
+from geometry_msgs.msg import PoseStamped
 
 
 class PlannerNode(Node):
@@ -22,10 +24,11 @@ class PlannerNode(Node):
         # Publishers
         self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.marker_pub = self.create_publisher(MarkerArray, '/planner_markers', 10)
+        self.raw_path_pub = self.create_publisher(Path, '/raw_path', 10)
+        self.pruned_path_pub = self.create_publisher(Path, '/pruned_path', 10)  
 
         #timers
         self.marker_timer = self.create_timer(0.1, self.publish_path_markers)
-        self.control_timer = self.create_timer(0.1, self.control_loop)
 
         # Subscribers
         self.gt_sub = self.create_subscription(
@@ -61,17 +64,6 @@ class PlannerNode(Node):
         self.pruned_world_path = None
 
 
-        #control initializaiton 
-        self.controller_state = "idle"
-        self.current_waypoint_idx = 0
-
-        self.position_tolerance = 0.15
-        self.heading_tolerance = 0.15
-
-        self.max_linear_speed = 0.35
-        self.max_angular_speed = 0.8
-
-        self.current_goal_world = None
 
         pkg_share = get_package_share_directory('ras598_assignment_2')
 
@@ -141,9 +133,7 @@ class PlannerNode(Node):
 
             self.get_logger().info(f"Pruned path has {len(self.pruned_grid_path)} waypoints")
             
-            self.current_waypoint_idx = 1 if len(self.pruned_world_path) > 1 else 0
-            self.controller_state = "rotate"
-            
+
         except Exception as e:
             self.get_logger().error(f'Failed to parse task response: {e}')
 
@@ -487,6 +477,32 @@ class PlannerNode(Node):
 
         if len(marker_array.markers) > 0:
             self.marker_pub.publish(marker_array)
+        
+        if self.raw_world_path is not None:
+            self.publish_path(self.raw_world_path, self.raw_path_pub, frame_id=self.global_frame)
+
+        if self.pruned_world_path is not None:
+            self.publish_path(self.pruned_world_path, self.pruned_path_pub, frame_id=self.global_frame)
+
+
+    def publish_path(self, path_points, publisher, frame_id='map'):
+        """
+        path_points: list of (x, y) tuples in map frame
+        """
+        msg = Path()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = frame_id
+
+        for x, y in path_points:
+            pose = PoseStamped()
+            pose.header = msg.header
+            pose.pose.position.x = float(x)
+            pose.pose.position.y = float(y)
+            pose.pose.position.z = 0.0
+            pose.pose.orientation.w = 1.0
+            msg.poses.append(pose)
+
+        publisher.publish(msg)
 
 def main(args=None):
     rclpy.init(args=args)

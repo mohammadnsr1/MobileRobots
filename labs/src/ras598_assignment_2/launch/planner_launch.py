@@ -37,6 +37,7 @@ def main():
             name='planner',
             output='screen',
         ),
+
         # Grading Scout (External Python Script)
         ExecuteProcess(
             cmd=['python3', scout_script_path],

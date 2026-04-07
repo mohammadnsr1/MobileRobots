@@ -30,6 +30,7 @@ setup(
     entry_points={
         'console_scripts': [
             'planner = ras598_assignment_2.planner:main',
+            'controller = ras598_assignment_2.controller:main',
         ],
     },
 )
