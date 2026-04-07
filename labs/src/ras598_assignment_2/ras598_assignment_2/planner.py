@@ -36,6 +36,13 @@ class PlannerNode(Node):
         self.start = None
         self.goal = None
 
+        self.map_resolution = 0.032
+        self.map_origin_x = -8.0
+        self.map_origin_y = -8.0
+        self.grid_resolution = 0.2
+        self.map_width = 500   # replace with actual loaded image width
+        self.map_height = 500  # replace with actual loaded image height
+
         self.get_logger().info('Waiting for /get_task service...')
         while not self.task_client.wait_for_service(timeout_sec=1.0):
             self.get_logger().info('/get_task not available yet...')
@@ -90,6 +97,25 @@ class PlannerNode(Node):
     def energy_callback(self, msg: Float32):
         self.energy = msg.data
 
+    def world_to_pixel(self, x, y):
+        u = int((x - self.map_origin_x) / self.map_resolution)
+        v = int(self.map_height - (y - self.map_origin_y) / self.map_resolution)
+        return u, v
+
+    def pixel_to_world(self, u, v):
+        x = self.map_origin_x + u * self.map_resolution
+        y = self.map_origin_y + (self.map_height - v) * self.map_resolution
+        return x, y
+
+    def world_to_grid(self, x, y):
+        gx = int((x - self.map_origin_x) / self.grid_resolution)
+        gy = int((y - self.map_origin_y) / self.grid_resolution)
+        return gx, gy
+
+    def grid_to_world(self, gx, gy):
+        x = self.map_origin_x + (gx + 0.5) * self.grid_resolution
+        y = self.map_origin_y + (gy + 0.5) * self.grid_resolution
+        return x, y
 
 def main(args=None):
     rclpy.init(args=args)
