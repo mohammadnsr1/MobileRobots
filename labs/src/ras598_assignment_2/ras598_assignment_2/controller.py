@@ -10,7 +10,6 @@ from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry, Path
 
 from visualization_msgs.msg import Marker
-from geometry_msgs.msg import Point
 
 
 def wrap_to_pi(angle: float) -> float:
@@ -37,16 +36,16 @@ class PathController(Node):
         self.declare_parameter('cmd_vel_topic', '/cmd_vel')
 
         self.declare_parameter('control_rate', 10.0)
-        self.declare_parameter('waypoint_tolerance', 0.15)
-        self.declare_parameter('goal_tolerance', 0.00)
+        self.declare_parameter('waypoint_tolerance', 0.6)
+        self.declare_parameter('goal_tolerance', 0.2)
 
-        self.declare_parameter('max_linear_speed', 0.35)
-        self.declare_parameter('max_angular_speed', 1.5)
+        self.declare_parameter('max_linear_speed',1.5)
+        self.declare_parameter('max_angular_speed', 1.0)
 
         self.declare_parameter('k_linear', 1.0)
-        self.declare_parameter('k_angular', 1.0)
+        self.declare_parameter('k_angular', 1.2)
 
-        self.declare_parameter('rotate_in_place_angle_deg', 25.0)
+        self.declare_parameter('rotate_in_place_angle_deg', 60)
 
         path_topic = self.get_parameter('path_topic').value
         odom_topic = self.get_parameter('odom_topic').value
@@ -127,6 +126,7 @@ class PathController(Node):
             self.current_waypoint_idx = 0
 
         self.update_current_target()
+        self.publish_target_marker()
 
         self.get_logger().info(
             f'Received new pruned path with {len(self.path_points)} waypoint(s). '
@@ -171,17 +171,20 @@ class PathController(Node):
             self.publish_stop()
             self.publish_target_marker()
             return   
+        
         x, y, yaw = self.current_pose
 
         # Safety: if index already beyond end, stop
         if self.current_waypoint_idx >= len(self.path_points):
             self.publish_stop()
             self.has_active_path = False
+            self.current_target_point = None
+            self.publish_target_marker()
             self.get_logger().info('Path completed.')
             return
 
         # Current target waypoint
-        tx, ty = self.path_points[self.current_waypoint_idx]
+        tx, ty = self.current_target_point
 
         dx = tx - x
         dy = ty - y
@@ -196,10 +199,14 @@ class PathController(Node):
             if is_final_waypoint:
                 self.publish_stop()
                 self.has_active_path = False
+                self.current_target_point = None
+                self.publish_target_marker()
                 self.get_logger().info('Final goal reached. Stopping.')
                 return
             else:
                 self.current_waypoint_idx += 1
+                self.update_current_target()
+                self.publish_target_marker()
                 self.get_logger().info(
                     f'Advancing to waypoint {self.current_waypoint_idx + 1}/{len(self.path_points)}'
                 )
@@ -210,15 +217,16 @@ class PathController(Node):
 
         cmd = Twist()
 
-        # If heading error is large, rotate first
+        # If heading error is large → rotate in place
         if abs(yaw_error) > self.rotate_in_place_angle:
             cmd.linear.x = 0.0
             cmd.angular.z = max(
                 -self.max_angular_speed,
                 min(self.max_angular_speed, self.k_angular * yaw_error)
             )
+
         else:
-            linear_cmd = self.k_linear * dist
+            linear_cmd = self.k_linear * dist * max(0.0, math.cos(yaw_error))
             angular_cmd = self.k_angular * yaw_error
 
             cmd.linear.x = min(self.max_linear_speed, linear_cmd)
@@ -226,6 +234,7 @@ class PathController(Node):
                 -self.max_angular_speed,
                 min(self.max_angular_speed, angular_cmd)
             )
+
         self.publish_target_marker()
         self.cmd_pub.publish(cmd)
 
