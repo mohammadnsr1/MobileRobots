@@ -9,6 +9,9 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry, Path
 
+from visualization_msgs.msg import Marker
+from geometry_msgs.msg import Point
+
 
 def wrap_to_pi(angle: float) -> float:
     while angle > math.pi:
@@ -28,26 +31,29 @@ class PathController(Node):
     def __init__(self) -> None:
         super().__init__('controller')
 
-        # ===== Parameters for first working version =====
+        # ===== Parameters =====
         self.declare_parameter('path_topic', '/pruned_path')
         self.declare_parameter('odom_topic', '/ground_truth')
         self.declare_parameter('cmd_vel_topic', '/cmd_vel')
 
         self.declare_parameter('control_rate', 10.0)
         self.declare_parameter('waypoint_tolerance', 0.15)
-        self.declare_parameter('goal_tolerance', 0.12)
+        self.declare_parameter('goal_tolerance', 0.00)
 
         self.declare_parameter('max_linear_speed', 0.35)
-        self.declare_parameter('max_angular_speed', 1.2)
+        self.declare_parameter('max_angular_speed', 1.5)
 
-        self.declare_parameter('k_linear', 0.8)
-        self.declare_parameter('k_angular', 1.8)
+        self.declare_parameter('k_linear', 1.0)
+        self.declare_parameter('k_angular', 1.0)
 
         self.declare_parameter('rotate_in_place_angle_deg', 25.0)
 
         path_topic = self.get_parameter('path_topic').value
         odom_topic = self.get_parameter('odom_topic').value
         cmd_vel_topic = self.get_parameter('cmd_vel_topic').value
+
+        #publishers
+        self.target_marker_pub = self.create_publisher(Marker, '/controller_markers', 10)
 
         self.control_rate = float(self.get_parameter('control_rate').value)
         self.waypoint_tolerance = float(self.get_parameter('waypoint_tolerance').value)
@@ -67,6 +73,7 @@ class PathController(Node):
         self.path_points: List[Tuple[float, float]] = []
         self.current_waypoint_idx = 0
         self.has_active_path = False
+        self.current_target_point = None   # (x, y)
         self.last_path_stamp = None
 
         # ===== ROS interfaces =====
@@ -93,6 +100,7 @@ class PathController(Node):
         self.get_logger().info(f'  odom topic: {odom_topic}')
         self.get_logger().info(f'  cmd_vel topic: {cmd_vel_topic}')
 
+
     def path_callback(self, msg: Path) -> None:
         if len(msg.poses) == 0:
             self.get_logger().warn('Received empty path. Ignoring.')
@@ -104,13 +112,25 @@ class PathController(Node):
             py = pose_stamped.pose.position.y
             new_points.append((px, py))
 
+        # Ignore identical path updates
+        if len(self.path_points) > 0 and self.path_points == new_points:
+            return
+
         self.path_points = new_points
-        self.current_waypoint_idx = 0
-        self.has_active_path = True
         self.last_path_stamp = msg.header.stamp
+        self.has_active_path = True
+
+        # Start from first real tracking point if possible
+        if len(self.path_points) > 1:
+            self.current_waypoint_idx = 1
+        else:
+            self.current_waypoint_idx = 0
+
+        self.update_current_target()
 
         self.get_logger().info(
-            f'Received new pruned path with {len(self.path_points)} waypoint(s).'
+            f'Received new pruned path with {len(self.path_points)} waypoint(s). '
+            f'Current target waypoint: {self.current_waypoint_idx + 1}/{len(self.path_points)}'
         )
 
     def odom_callback(self, msg: Odometry) -> None:
@@ -122,6 +142,18 @@ class PathController(Node):
 
         self.current_pose = (px, py, yaw)
 
+    def update_current_target(self) -> None:
+        if not self.has_active_path or len(self.path_points) == 0:
+            self.current_target_point = None
+            return
+
+        if self.current_waypoint_idx >= len(self.path_points):
+            self.current_target_point = None
+            return
+
+        self.current_target_point = self.path_points[self.current_waypoint_idx]
+
+
     def publish_stop(self) -> None:
         cmd = Twist()
         self.cmd_pub.publish(cmd)
@@ -132,8 +164,13 @@ class PathController(Node):
 
         if not self.has_active_path or len(self.path_points) == 0:
             self.publish_stop()
+            self.publish_target_marker()
             return
 
+        if self.current_target_point is None:
+            self.publish_stop()
+            self.publish_target_marker()
+            return   
         x, y, yaw = self.current_pose
 
         # Safety: if index already beyond end, stop
@@ -189,8 +226,42 @@ class PathController(Node):
                 -self.max_angular_speed,
                 min(self.max_angular_speed, angular_cmd)
             )
-
+        self.publish_target_marker()
         self.cmd_pub.publish(cmd)
+
+
+    def publish_target_marker(self) -> None:
+        marker = Marker()
+        marker.header.frame_id = 'map'
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = 'controller_target'
+        marker.id = 0
+
+        if self.current_target_point is None:
+            marker.action = Marker.DELETE
+            self.target_marker_pub.publish(marker)
+            return
+
+        tx, ty = self.current_target_point
+
+        marker.action = Marker.ADD
+        marker.type = Marker.SPHERE
+
+        marker.pose.position.x = float(tx)
+        marker.pose.position.y = float(ty)
+        marker.pose.position.z = 0.15
+        marker.pose.orientation.w = 1.0
+
+        marker.scale.x = 0.25
+        marker.scale.y = 0.25
+        marker.scale.z = 0.25
+
+        marker.color.r = 1.0
+        marker.color.g = 0.0
+        marker.color.b = 0.0
+        marker.color.a = 1.0
+
+        self.target_marker_pub.publish(marker)
 
 
 def main(args=None) -> None:

@@ -2,28 +2,16 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import ExecuteProcess, IncludeLaunchDescription, SetEnvironmentVariable
-from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.actions import ExecuteProcess
 from launch_ros.actions import Node
 
 
 def generate_launch_description():
     package_share_directory = get_package_share_directory('ras598_assignment_2')
-    stage_share_directory = get_package_share_directory('stage_ros2')
     map_yaml_path = os.path.join(package_share_directory, 'maps', 'map.yaml')
     scout_script_path = os.path.join(package_share_directory, 'grading_scout.py')
-    rviz_config_path = os.path.join(package_share_directory, 'planning.rviz')
-    stage_launch_path = os.path.join(stage_share_directory, 'launch', 'demo.launch.py')
 
     return LaunchDescription([
-        SetEnvironmentVariable('QT_QPA_PLATFORM', 'wayland'),
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(stage_launch_path),
-            launch_arguments={
-                'world': 'cave',
-                'use_stamped_velocity': 'false',
-            }.items(),
-        ),
         Node(
             package='nav2_map_server',
             executable='map_server',
@@ -48,20 +36,6 @@ def generate_launch_description():
             executable='planner',
             name='planner',
             output='screen',
-        ),
-        Node(
-            package='ras598_assignment_2',
-            executable='controller',
-            name='controller',
-            output='screen',
-        ),
-        Node(
-            package='rviz2',
-            executable='rviz2',
-            name='rviz2',
-            output='screen',
-            arguments=['-d', rviz_config_path],
-            additional_env={'QT_QPA_PLATFORM': 'xcb'},
         ),
         ExecuteProcess(
             cmd=['python3', scout_script_path],
