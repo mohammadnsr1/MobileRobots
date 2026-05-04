@@ -18,7 +18,7 @@ class BayesFilter3D(Node):
         # --- CONFIGURATION ---
         self.world_size = 16.0         # Total width/height of the environment (meters)
         self.resolution = 0.2          # Size of one grid cell (meters)
-        self.theta_res = a             # Angular resolution (degrees)
+        self.theta_res = 10            # Angular resolution (degrees)
         self.grid_dim = int(self.world_size / self.resolution)
         self.theta_dim = int(360 / self.theta_res)
 
@@ -48,7 +48,7 @@ class BayesFilter3D(Node):
         # --- SUBSCRIPTIONS ---
         self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
         self.create_subscription(Odometry, '/ground_truth', self.gt_callback, 10)
-        self.create_subscription(MarkerDetection, '/fiducials', self._fiducial_callback, 10)
+        self.create_subscription(MarkerDetection, '/fiducials', self.fiducial_callback, 10)
 
         # Refresh landmarks in RViz
         self.create_timer(1.0, self._publish_landmarks)
@@ -124,6 +124,31 @@ class BayesFilter3D(Node):
     #  ASSIGNMENT TASKS
     # -------------------------------------------------------------------------
 
+    def normalize_angle_deg(self, angle):
+        """Wrap angle to [-180, 180)."""
+        return (angle + 180.0) % 360.0 - 180.0
+
+    def _normalize_belief(self):
+        total = np.sum(self.belief)
+        if total <= 0.0:
+            self.belief.fill(1.0 / self.belief.size)
+        else:
+            self.belief /= total
+
+    def zero_wrapped_edges(self, arr, row_shift, col_shift):
+        """Clear wrapped probability after np.roll."""
+        if row_shift > 0:
+            arr[:row_shift, :] = 0.0
+        elif row_shift < 0:
+            arr[row_shift:, :] = 0.0
+
+        if col_shift > 0:
+            arr[:, :col_shift] = 0.0
+        elif col_shift < 0:
+            arr[:, col_shift:] = 0.0
+
+        return arr
+
     def gt_callback(self, msg):
         """Updates Ground Truth path for visualization."""
         p = PoseStamped(header=msg.header)
@@ -138,9 +163,16 @@ class BayesFilter3D(Node):
         distribution (e.g., a point or Gaussian). If 'pose' is None, 
         initialize a Uniform distribution across the entire state space.
         """
-        # TODO: Create a numpy array of shape (grid_dim, grid_dim, theta_dim)
-        # TODO: Assign probability values and ensure they sum to 1.0
-        pass
+        self.belief = np.zeros((self.grid_dim, self.grid_dim, self.theta_dim), dtype=np.float64)
+
+        if pose is None:
+            self.belief.fill(1.0 / self.belief.size)
+            return
+
+        ix, iy, ith = self.real_to_grid(pose[0], pose[1], pose[2])
+        self.belief[iy, ix, ith] = 1.0
+        self.belief = gaussian_filter(self.belief, sigma=(1.0, 1.0, 0.6), mode='constant')
+        self._normalize_belief()
 
     def real_to_grid(self, x, y, theta_deg):
         """
@@ -148,7 +180,16 @@ class BayesFilter3D(Node):
         Convert continuous world coordinates to discrete 3D grid indices.
         Returns: (ix, iy, ith)
         """
-        pass
+        ix = int((x + self.world_size / 2.0) / self.resolution)
+        iy_world = int((y + self.world_size / 2.0) / self.resolution)
+        iy = self.grid_dim - 1 - iy_world
+
+        ix = int(np.clip(ix, 0, self.grid_dim - 1))
+        iy = int(np.clip(iy, 0, self.grid_dim - 1))
+
+        theta_deg = theta_deg % 360.0
+        ith = int(np.round(theta_deg / self.theta_res)) % self.theta_dim
+        return ix, iy, ith
 
     def grid_to_real(self):
         """
@@ -157,7 +198,14 @@ class BayesFilter3D(Node):
         values for every cell in the belief grid.
         Returns: rx, ry, rth (all numpy arrays of shape self.belief.shape)
         """
-        pass
+        x_centers = -self.world_size / 2.0 + (np.arange(self.grid_dim) + 0.5) * self.resolution
+        y_centers = self.world_size / 2.0 - (np.arange(self.grid_dim) + 0.5) * self.resolution
+        theta_centers = np.arange(self.theta_dim, dtype=np.float64) * self.theta_res
+
+        rx = x_centers[np.newaxis, :, np.newaxis] * np.ones(self.belief.shape, dtype=np.float64)
+        ry = y_centers[:, np.newaxis, np.newaxis] * np.ones(self.belief.shape, dtype=np.float64)
+        rth = theta_centers[np.newaxis, np.newaxis, :] * np.ones(self.belief.shape, dtype=np.float64)
+        return rx, ry, rth
 
     def predict(self, curr_msg, last_msg):
         """
@@ -165,21 +213,75 @@ class BayesFilter3D(Node):
         Implement the 'Turn-Go-Turn' model. Update self.belief to reflect 
         the robot's movement between last_msg and curr_msg.
         """
-        # TODO: Calculate deltas (d_rot1, d_trans, d_rot2)
-        # TODO: Apply shifts along spatial and angular axes
-        # TODO: Apply a diffusion filter (e.g., Gaussian) to model uncertainty
-        pass
+        curr_pose = curr_msg.pose.pose
+        last_pose = last_msg.pose.pose
 
-    def update_measurement(self):
+        curr_x = curr_pose.position.x
+        curr_y = curr_pose.position.y
+        last_x = last_pose.position.x
+        last_y = last_pose.position.y
+
+        curr_q = curr_pose.orientation
+        last_q = last_pose.orientation
+        curr_yaw_rad = euler_from_quaternion([curr_q.x, curr_q.y, curr_q.z, curr_q.w])[2]
+        last_yaw_rad = euler_from_quaternion([last_q.x, last_q.y, last_q.z, last_q.w])[2]
+        curr_yaw_deg = np.degrees(curr_yaw_rad)
+        last_yaw_deg = np.degrees(last_yaw_rad)
+
+        dx_world = curr_x - last_x
+        dy_world = curr_y - last_y
+        dtheta_deg = self.normalize_angle_deg(curr_yaw_deg - last_yaw_deg)
+
+        d_trans = np.hypot(dx_world, dy_world)
+        heading_deg = np.degrees(np.arctan2(dy_world, dx_world)) if d_trans > 1e-9 else last_yaw_deg
+        d_rot1 = self.normalize_angle_deg(heading_deg - last_yaw_deg) if d_trans > 1e-9 else 0.0
+
+        theta_shift_bins = int(np.round(dtheta_deg / self.theta_res))
+        rotated_belief = np.roll(self.belief, shift=theta_shift_bins, axis=2)
+        predicted = np.zeros_like(rotated_belief)
+
+        for ith in range(self.theta_dim):
+            theta_bin_deg = ith * self.theta_res
+            theta_total_rad = np.radians(theta_bin_deg + d_rot1)
+            shift_x_m = d_trans * np.cos(theta_total_rad)
+            shift_y_m = d_trans * np.sin(theta_total_rad)
+            shift_cols = int(np.round(shift_x_m / self.resolution))
+            shift_rows = int(np.round(-shift_y_m / self.resolution))
+
+            shifted = np.roll(rotated_belief[:, :, ith], shift=(shift_rows, shift_cols), axis=(0, 1))
+            predicted[:, :, ith] = self.zero_wrapped_edges(shifted, shift_rows, shift_cols)
+
+        self.belief = gaussian_filter(predicted, sigma=(1.0, 1.0, 0.6), mode='constant')
+        self._normalize_belief()
+
+    def update_measurement(self, landmark_id, measured_range, measured_bearing_deg):
         """
         TASK 4: Measurement Model (Update).
         Correct the belief using a landmark sighting.
         """
-        # TODO: Calculate expected range and bearing for every cell in the grid
-        # TODO: Compute the Gaussian likelihood and multiply by current belief
-        # TODO: Re-normalize the belief
-        # WARN: If you change the function definition, make sure to change it accordingly in  _fiducial_callback()
-        pass
+        if landmark_id not in self.landmarks:
+            return
+
+        lx, ly = self.landmarks[landmark_id]
+        rx, ry, rth = self.grid_to_real()
+
+        dx = lx - rx
+        dy = ly - ry
+        expected_range = np.hypot(dx, dy)
+        expected_bearing_deg = self.normalize_angle_deg(np.degrees(np.arctan2(dy, dx)) - rth)
+
+        range_error = measured_range - expected_range
+        bearing_error = self.normalize_angle_deg(measured_bearing_deg - expected_bearing_deg)
+
+        sigma_r = 0.5
+        sigma_b = 15.0
+        p_r = np.exp(-0.5 * (range_error / sigma_r) ** 2)
+        p_b = np.exp(-0.5 * (bearing_error / sigma_b) ** 2)
+        likelihood = p_r * p_b
+
+        self.belief *= likelihood
+        self.belief += 1e-12
+        self._normalize_belief()
 
 
     def odom_callback(self, msg):
@@ -221,7 +323,16 @@ class BayesFilter3D(Node):
         Performs the Measurement update for every landmark (also called marker) seen by the robot
         """
         for marker in msg.markers:
-            pass
+            if not marker.ids:
+                continue
+
+            landmark_id = int(marker.ids[0])
+            rel_x = marker.pose.position.x
+            rel_y = marker.pose.position.y
+
+            measured_range = float(np.hypot(rel_x, rel_y))
+            measured_bearing_deg = float(np.degrees(np.arctan2(rel_y, rel_x)))
+            self.update_measurement(landmark_id, measured_range, measured_bearing_deg)
 
         # Publishes the probability distribution costmap
         self._publish_costmap() # Dont remove this line
