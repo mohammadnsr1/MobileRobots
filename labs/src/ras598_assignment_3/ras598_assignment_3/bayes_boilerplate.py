@@ -29,8 +29,10 @@ class BayesFilter3D(Node):
         self.odom_path_pub = self.create_publisher(Path, 'viz/odom_path', 10)
         
         # Path messages initialization
-        self.gt_path_msg = Path(header={'frame_id': 'map'})
-        self.odom_path_msg = Path(header={'frame_id': 'map'})
+        self.gt_path_msg = Path()
+        self.gt_path_msg.header.frame_id = 'map'
+        self.odom_path_msg = Path()
+        self.odom_path_msg.header.frame_id = 'map'
 
         # --- FILTER STATE INITIALIZATION ---
         self.landmarks = self._parse_world_file(world_file_path)
@@ -86,13 +88,21 @@ class BayesFilter3D(Node):
         ma = MarkerArray()
         for tid, (tx, ty) in self.landmarks.items():
             # Cylinder Marker
-            c = Marker(header={'frame_id': 'map'}, id=tid, type=Marker.CYLINDER, action=Marker.ADD)
+            c = Marker()
+            c.header.frame_id = 'map'
+            c.id = tid
+            c.type = Marker.CYLINDER
+            c.action = Marker.ADD
             c.pose.position.x, c.pose.position.y, c.pose.position.z = tx, ty, 0.5
             c.scale.x, c.scale.y, c.scale.z = 0.3, 0.3, 1.0
             c.color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=1.0)
             ma.markers.append(c)
             # Text ID Marker
-            t = Marker(header={'frame_id': 'map'}, id=tid + 1000, type=Marker.TEXT_VIEW_FACING)
+            t = Marker()
+            t.header.frame_id = 'map'
+            t.id = tid + 1000
+            t.type = Marker.TEXT_VIEW_FACING
+            t.action = Marker.ADD
             t.text = f"ID: {tid}"
             t.pose.position.x, t.pose.position.y, t.pose.position.z = tx, ty + 0.5, 1.2
             t.scale.z = 0.4 
@@ -103,9 +113,11 @@ class BayesFilter3D(Node):
     def _publish_costmap(self):
         """Publishes the 2D projected belief as an OccupancyGrid."""
         if not hasattr(self, 'belief'): return
-        grid = OccupancyGrid(header={'frame_id': 'map', 'stamp': self.get_clock().now().to_msg()})
+        grid = OccupancyGrid()
+        grid.header.frame_id = 'map'
+        grid.header.stamp = self.get_clock().now().to_msg()
         grid.info.resolution, grid.info.width, grid.info.height = self.resolution, self.grid_dim, self.grid_dim
-        grid.info.origin.position.x, grid.info.origin.position.y = -8, -8
+        grid.info.origin.position.x, grid.info.origin.position.y = -8.0, -8.0
 
         belief_2d = np.sum(self.belief, axis=2)
         belief_flipped = np.flipud(belief_2d) # Match ROS bottom-up convention
