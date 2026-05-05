@@ -15,7 +15,7 @@ setup(
     zip_safe=True,
     maintainer='mohammadnsr1',
     maintainer_email='nasrmohammad661@gmail.com',
-    description='TODO: Package description',
+    description='ras598_assignment_3',
     license='Apache-2.0',
     extras_require={
         'test': [
@@ -24,6 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'bayes_filter = ras598_assignment_3.bayes_boilerplate:main',
         ],
     },
 )
