@@ -39,5 +39,6 @@ def generate_launch_description():
             output='screen',
             arguments=['-d', rviz_config],
             parameters=[{'use_sim_time': True}],
+            additional_env={'QT_QPA_PLATFORM': 'xcb'},
         ),
     ])
