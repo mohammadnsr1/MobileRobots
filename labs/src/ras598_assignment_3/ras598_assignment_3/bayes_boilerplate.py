@@ -341,7 +341,7 @@ class BayesFilter3D(Node):
 def main():
     rclpy.init()
 
-    world_path = os.path.expanduser("~/ros_ws/src/stage_ros2/world/cave.world")
+    world_path = os.path.expanduser("/home/mohammadnsr1/coursework/MobileRobots/labs/src/stage_ros2/world/cave.world")
     if not os.path.exists(world_path):
         print("\n" + "="*50)
         print("ERROR: World file not found!")
