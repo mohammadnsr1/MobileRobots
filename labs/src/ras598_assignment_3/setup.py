@@ -28,6 +28,8 @@ setup(
     entry_points={
         'console_scripts': [
             'bayes_filter = ras598_assignment_3.bayes_boilerplate:main',
+            'tune_motion = ras598_assignment_3.tune_motion:main',
+            'tune_sensor = ras598_assignment_3.tune_sensor:main',
         ],
     },
 )

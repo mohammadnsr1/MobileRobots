@@ -1,26 +1,82 @@
-import rclpy
-from rclpy.node import Node
-from nav_msgs.msg import Odometry, Path, OccupancyGrid
-from marker_msgs.msg import MarkerDetection
-from geometry_msgs.msg import PoseStamped
-from visualization_msgs.msg import Marker, MarkerArray
-from std_msgs.msg import ColorRGBA
-import numpy as np
-from scipy.ndimage import gaussian_filter
-from tf_transformations import euler_from_quaternion
-import re
 import os
+import re
+
+import numpy as np
+import rclpy
+from geometry_msgs.msg import PoseStamped
+from marker_msgs.msg import MarkerDetection
+from nav_msgs.msg import OccupancyGrid, Odometry, Path
+from rclpy.node import Node
+from scipy.ndimage import gaussian_filter
+from std_msgs.msg import ColorRGBA
+from tf_transformations import euler_from_quaternion
+from visualization_msgs.msg import Marker, MarkerArray
+
+
+def normalize_angle_deg(angle):
+    """Wrap angle to [-180, 180)."""
+    return (angle + 180.0) % 360.0 - 180.0
+
+
+def parse_world_file(path):
+    """Parse Stage .world file for landmark positions."""
+    found = {}
+    if not os.path.exists(path):
+        return found
+
+    with open(path, 'r', encoding='utf-8') as world_file:
+        content = world_file.read()
+
+    block_pattern = re.compile(r'my_block\s*\((.*?)\)', re.DOTALL)
+    pose_pattern = re.compile(r'pose\s*\[\s*([-\d.]+)\s+([-\d.]+)')
+    id_pattern = re.compile(r'fiducial_return\s+(\d+)')
+
+    for block_content in block_pattern.findall(content):
+        pose_match = pose_pattern.search(block_content)
+        id_match = id_pattern.search(block_content)
+        if pose_match and id_match:
+            found[int(id_match.group(1))] = (
+                float(pose_match.group(1)),
+                float(pose_match.group(2)),
+            )
+
+    return found
+
+
+def yaw_deg_from_pose(pose):
+    q = pose.orientation
+    return np.degrees(euler_from_quaternion([q.x, q.y, q.z, q.w])[2])
+
+
+def decompose_turn_go_turn(x0, y0, yaw0_deg, x1, y1, yaw1_deg):
+    dx = x1 - x0
+    dy = y1 - y0
+    d_trans = float(np.hypot(dx, dy))
+
+    if d_trans > 1e-6:
+        heading_deg = np.degrees(np.arctan2(dy, dx))
+        d_rot1_deg = normalize_angle_deg(heading_deg - yaw0_deg)
+    else:
+        d_rot1_deg = 0.0
+
+    d_rot2_deg = normalize_angle_deg(yaw1_deg - yaw0_deg - d_rot1_deg)
+    return d_rot1_deg, d_trans, d_rot2_deg
 
 class BayesFilter3D(Node):
     def __init__(self, world_file_path):
         super().__init__('bayes_filter_3d_node')
         
         # --- CONFIGURATION ---
-        self.world_size = 16.0         # Total width/height of the environment (meters)
-        self.resolution = 0.2          # Size of one grid cell (meters)
-        self.theta_res = 10            # Angular resolution (degrees)
+        self.world_size = 16.0
+        self.resolution = 0.2
+        self.theta_res = 10
         self.grid_dim = int(self.world_size / self.resolution)
         self.theta_dim = int(360 / self.theta_res)
+        self.sigma_rot1_deg = 0.711
+        self.sigma_trans_m = 0.050
+        self.sigma_rot2_deg = 1.743
+        self.sigma_r = 0.5
+        self.sigma_b_deg = 15.0
 
         # --- ROS PUBLISHERS ---
         self.costmap_pub = self.create_publisher(OccupancyGrid, 'viz/belief_costmap', 10)
@@ -35,8 +91,8 @@ class BayesFilter3D(Node):
         self.odom_path_msg.header.frame_id = 'map'
 
         # --- FILTER STATE INITIALIZATION ---
-        self.landmarks = self._parse_world_file(world_file_path)
-        self.initial_pose = [-7.0, -7.0, 90.0]  # [x, y, theta_degrees] DO NOT CHANGE THIS!
+        self.landmarks = parse_world_file(world_file_path)
+        self.initial_pose = [-7.0, -7.0, 90.0]
         
         # Trajectory tracking for visualization
         self.odom_x, self.odom_y = self.initial_pose[0], self.initial_pose[1]
@@ -66,22 +122,6 @@ class BayesFilter3D(Node):
     # UTILITY & VISUALIZATION FUNCTIONS
     # You don't need to change the function code for these functions.
     # -------------------------------------------------------------------------
-
-    def _parse_world_file(self, path):
-        """Parses Stage .world file for landmark positions."""
-        found = {}
-        if not os.path.exists(path): return found
-        with open(path, 'r') as f:
-            content = f.read()
-        block_pattern = re.compile(r'my_block\s*\((.*?)\)', re.DOTALL)
-        pose_pattern = re.compile(r'pose\s*\[\s*([-\d.]+)\s+([-\d.]+)')
-        id_pattern = re.compile(r'fiducial_return\s+(\d+)')
-        for block_content in block_pattern.findall(content):
-            p_match = pose_pattern.search(block_content)
-            id_match = id_pattern.search(block_content)
-            if p_match and id_match:
-                found[int(id_match.group(1))] = (float(p_match.group(1)), float(p_match.group(2)))
-        return found
 
     def _publish_landmarks(self):
         """Publishes landmark locations as Markers for RViz."""
@@ -135,10 +175,6 @@ class BayesFilter3D(Node):
     # -------------------------------------------------------------------------
     #  ASSIGNMENT TASKS
     # -------------------------------------------------------------------------
-
-    def normalize_angle_deg(self, angle):
-        """Wrap angle to [-180, 180)."""
-        return (angle + 180.0) % 360.0 - 180.0
 
     def _normalize_belief(self):
         total = np.sum(self.belief)
@@ -233,37 +269,59 @@ class BayesFilter3D(Node):
         last_x = last_pose.position.x
         last_y = last_pose.position.y
 
-        curr_q = curr_pose.orientation
-        last_q = last_pose.orientation
-        curr_yaw_rad = euler_from_quaternion([curr_q.x, curr_q.y, curr_q.z, curr_q.w])[2]
-        last_yaw_rad = euler_from_quaternion([last_q.x, last_q.y, last_q.z, last_q.w])[2]
-        curr_yaw_deg = np.degrees(curr_yaw_rad)
-        last_yaw_deg = np.degrees(last_yaw_rad)
+        curr_yaw_deg = yaw_deg_from_pose(curr_pose)
+        last_yaw_deg = yaw_deg_from_pose(last_pose)
+        d_rot1_deg, d_trans_m, d_rot2_deg = decompose_turn_go_turn(
+            last_x, last_y, last_yaw_deg,
+            curr_x, curr_y, curr_yaw_deg,
+        )
+        sigma_rot1_bins = self.sigma_rot1_deg / self.theta_res
+        sigma_rot2_bins = self.sigma_rot2_deg / self.theta_res
+        sigma_trans_cells = self.sigma_trans_m / self.resolution
 
-        dx_world = curr_x - last_x
-        dy_world = curr_y - last_y
-        dtheta_deg = self.normalize_angle_deg(curr_yaw_deg - last_yaw_deg)
+        belief_stage = self.belief.copy()
 
-        d_trans = np.hypot(dx_world, dy_world)
-        heading_deg = np.degrees(np.arctan2(dy_world, dx_world)) if d_trans > 1e-9 else last_yaw_deg
-        d_rot1 = self.normalize_angle_deg(heading_deg - last_yaw_deg) if d_trans > 1e-9 else 0.0
+        rot1_bins = int(np.round(d_rot1_deg / self.theta_res))
+        belief_stage = np.roll(belief_stage, shift=rot1_bins, axis=2)
+        if sigma_rot1_bins > 0.0:
+            belief_stage = gaussian_filter(
+                belief_stage,
+                sigma=(0.0, 0.0, sigma_rot1_bins),
+                mode='constant',
+            )
 
-        theta_shift_bins = int(np.round(dtheta_deg / self.theta_res))
-        rotated_belief = np.roll(self.belief, shift=theta_shift_bins, axis=2)
-        predicted = np.zeros_like(rotated_belief)
-
+        translated = np.zeros_like(belief_stage)
         for ith in range(self.theta_dim):
-            theta_bin_deg = ith * self.theta_res
-            theta_total_rad = np.radians(theta_bin_deg + d_rot1)
-            shift_x_m = d_trans * np.cos(theta_total_rad)
-            shift_y_m = d_trans * np.sin(theta_total_rad)
+            theta_rad = np.radians(ith * self.theta_res)
+            shift_x_m = d_trans_m * np.cos(theta_rad)
+            shift_y_m = d_trans_m * np.sin(theta_rad)
             shift_cols = int(np.round(shift_x_m / self.resolution))
             shift_rows = int(np.round(-shift_y_m / self.resolution))
+            shifted = np.roll(
+                belief_stage[:, :, ith],
+                shift=(shift_rows, shift_cols),
+                axis=(0, 1),
+            )
+            translated[:, :, ith] = self.zero_wrapped_edges(shifted, shift_rows, shift_cols)
 
-            shifted = np.roll(rotated_belief[:, :, ith], shift=(shift_rows, shift_cols), axis=(0, 1))
-            predicted[:, :, ith] = self.zero_wrapped_edges(shifted, shift_rows, shift_cols)
+        belief_stage = translated
+        if sigma_trans_cells > 0.0:
+            belief_stage = gaussian_filter(
+                belief_stage,
+                sigma=(sigma_trans_cells, sigma_trans_cells, 0.0),
+                mode='constant',
+            )
 
-        self.belief = gaussian_filter(predicted, sigma=(1.0, 1.0, 0.6), mode='constant')
+        rot2_bins = int(np.round(d_rot2_deg / self.theta_res))
+        belief_stage = np.roll(belief_stage, shift=rot2_bins, axis=2)
+        if sigma_rot2_bins > 0.0:
+            belief_stage = gaussian_filter(
+                belief_stage,
+                sigma=(0.0, 0.0, sigma_rot2_bins),
+                mode='constant',
+            )
+
+        self.belief = belief_stage
         self._normalize_belief()
 
     def update_measurement(self, landmark_id, measured_range, measured_bearing_deg):
@@ -280,15 +338,13 @@ class BayesFilter3D(Node):
         dx = lx - rx
         dy = ly - ry
         expected_range = np.hypot(dx, dy)
-        expected_bearing_deg = self.normalize_angle_deg(np.degrees(np.arctan2(dy, dx)) - rth)
+        expected_bearing_deg = normalize_angle_deg(np.degrees(np.arctan2(dy, dx)) - rth)
 
         range_error = measured_range - expected_range
-        bearing_error = self.normalize_angle_deg(measured_bearing_deg - expected_bearing_deg)
+        bearing_error = normalize_angle_deg(measured_bearing_deg - expected_bearing_deg)
 
-        sigma_r = 0.5
-        sigma_b = 15.0
-        p_r = np.exp(-0.5 * (range_error / sigma_r) ** 2)
-        p_b = np.exp(-0.5 * (bearing_error / sigma_b) ** 2)
+        p_r = np.exp(-0.5 * (range_error / self.sigma_r) ** 2)
+        p_b = np.exp(-0.5 * (bearing_error / self.sigma_b_deg) ** 2)
         likelihood = p_r * p_b
 
         self.belief *= likelihood
@@ -311,7 +367,7 @@ class BayesFilter3D(Node):
         # Calculates the differential odometry
         dx = msg.pose.pose.position.x - self.last_odom_pose.pose.pose.position.x
         dy = msg.pose.pose.position.y - self.last_odom_pose.pose.pose.position.y
-        dth = (curr_yaw_deg - old_yaw_deg + 180) % 360 - 180 
+        dth = normalize_angle_deg(curr_yaw_deg - old_yaw_deg)
 
         # Update and Publish Odom Path
         self.odom_th += np.radians(dth)
@@ -326,8 +382,8 @@ class BayesFilter3D(Node):
         # Run the prediction loop only when there is sufficient motion
         if np.sqrt(dx**2 + dy**2) > 0.001 or abs(dth) > 0.1:
             self.predict(msg, self.last_odom_pose)
-            self.last_odom_pose = msg
             self._publish_costmap()
+        self.last_odom_pose = msg
     
     def fiducial_callback(self, msg):
         """
